@@ -9,6 +9,7 @@ using namespace cl;
 
 template <typename T> class ReductionKernelNDRange;
 template <typename T> class ReductionKernelHierarchical;
+template <typename T> class ReductionKernelScoped;
 
 template <typename T>
 class SegmentedReduction
@@ -74,8 +75,8 @@ public:
     })); // submit
   }
 
-  void submit_hierarchical(std::vector<cl::sycl::event>& events){
 
+  void submit_hierarchical(std::vector<cl::sycl::event>& events){
     events.push_back(_args.device_queue.submit(
         [&](sycl::handler& cgh) {
 
@@ -115,6 +116,53 @@ public:
         });
     })); // submit
   }
+
+  void submit_scoped(std::vector<cl::sycl::event>& events){
+#ifdef __HIPSYCL__
+    events.push_back(_args.device_queue.submit(
+        [&](sycl::handler& cgh) {
+
+      using namespace sycl::access;
+
+      auto acc = _buff.template get_access<mode::read_write>(cgh);
+      auto scratch = sycl::accessor<T, 1, mode::read_write, target::local>
+        {_args.local_size, cgh};
+
+      const int group_size = _args.local_size;
+
+      cgh.parallel<ReductionKernelScoped<T>>(
+        sycl::range<1>{_args.problem_size / _args.local_size},
+        sycl::range<1>{_args.local_size},
+        [=](sycl::group<1> grp, sycl::physical_item<1> phys_id) {
+
+          grp.distribute_for([&](sycl::sub_group sg,
+                                sycl::logical_item<1> idx){
+            
+            const int lid = idx.get_local_id(0);
+            const auto gid = idx.get_global_id();
+
+            scratch[lid] = acc[gid];
+          });
+        
+          for(int i = group_size/2; i > 0; i /= 2) {
+            grp.distribute_for([&](sycl::sub_group sg,
+                                  sycl::logical_item<1> idx){
+              
+              const int lid = idx.get_local_id(0);
+
+              if (lid < i) 
+                scratch[lid] += scratch[lid + i];
+            });
+          }
+
+          grp.single_item([&](){
+            acc[grp.get_group_id(0) * grp.get_local_range(0)] = scratch[0];
+          });
+        });
+    })); // submit
+#endif
+  }
+
 
   bool verify(VerificationSetting &ver) {
     std::vector<T> original_input;
@@ -192,6 +240,29 @@ public:
   }
 };
 
+
+template<class T>
+class SegmentedReductionScoped : public SegmentedReduction<T>
+{
+public:
+  SegmentedReductionScoped(const BenchmarkArgs &args)
+  : SegmentedReduction<T>{args}
+  {}
+
+  void run(std::vector<cl::sycl::event>& events){
+    this->submit_scoped(events);
+    // Waiting is not necessary as the BenchmarkManager will already call
+    // wait_and_throw() here
+  }
+
+  static std::string getBenchmarkName() {
+    std::stringstream name;
+    name << "Pattern_SegmentedReduction_Scoped_";
+    name << ReadableTypename<T>::name;
+    return name.str();
+  }
+};
+
 int main(int argc, char** argv)
 {
   BenchmarkApp app(argc, argv);
@@ -209,6 +280,14 @@ int main(int argc, char** argv)
   app.run< SegmentedReductionHierarchical<long long>>();
   app.run< SegmentedReductionHierarchical<float>>();
   app.run< SegmentedReductionHierarchical<double>>();
+
+#ifdef __HIPSYCL__
+  app.run< SegmentedReductionScoped<short>>();
+  app.run< SegmentedReductionScoped<int>>();
+  app.run< SegmentedReductionScoped<long long>>();
+  app.run< SegmentedReductionScoped<float>>();
+  app.run< SegmentedReductionScoped<double>>();
+#endif
 
   return 0;
 }

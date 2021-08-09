@@ -7,6 +7,7 @@ using namespace cl;
 
 template<class float_type> class NDRangeNBodyKernel;
 template<class float_type> class HierarchicalNBodyKernel;
+template<class float_type> class ScopedNBodyKernel;
 
 
 template<class float_type>
@@ -286,6 +287,87 @@ protected:
           });
     });
   }
+
+  void submitScoped(sycl::buffer<particle_type>& particles, sycl::buffer<vector_type>& velocities) {
+#ifdef __HIPSYCL__
+    args.device_queue.submit([&](sycl::handler& cgh) {
+      sycl::nd_range<1> execution_range{sycl::range<1>{args.problem_size}, sycl::range<1>{args.local_size}};
+
+      auto particles_access = particles.template get_access<sycl::access::mode::read>(cgh);
+      auto velocities_access = velocities.template get_access<sycl::access::mode::read>(cgh);
+
+      auto output_particles_access = output_particles.template get_access<sycl::access::mode::discard_write>(cgh);
+      auto output_velocities_access = output_velocities.template get_access<sycl::access::mode::discard_write>(cgh);
+
+      auto scratch = sycl::accessor<particle_type, 1, sycl::access::mode::read_write, sycl::access::target::local>{
+          sycl::range<1>{args.local_size}, cgh};
+
+
+      const size_t local_size = args.local_size;
+      const size_t problem_size = args.problem_size;
+      cgh.parallel<ScopedNBodyKernel<float_type>>(sycl::range<1>{problem_size / local_size},
+          sycl::range<1>{local_size},
+          [=, dt = this->dt, gravitational_softening = this->gravitational_softening](
+            sycl::group<1> grp, sycl::physical_item<1>) {
+            
+            sycl::private_memory<particle_type> my_particle{grp};
+            sycl::private_memory<vector_type> acceleration{grp};
+
+            grp.distribute_for([&](sycl::sub_group, sycl::logical_item<1> idx) {
+              acceleration(idx) = vector_type{static_cast<float_type>(0.0f)};
+              my_particle(idx) = (idx.get_global_id(0) < problem_size) ? particles_access[idx.get_global_id(0)]
+                                                                       : particle_type{static_cast<float_type>(0.0f)};
+            });
+
+
+            for(size_t offset = 0; offset < problem_size; offset += local_size) {
+              grp.distribute_for([&](sycl::sub_group, sycl::logical_item<1> idx) {
+                scratch[idx.get_local_id(0)] = (idx.get_global_id(0) < problem_size)
+                                                   ? particles_access[offset + idx.get_local_id(0)]
+                                                   : particle_type{static_cast<float_type>(0.0f)};
+              });
+
+              grp.distribute_for([&](sycl::sub_group, sycl::logical_item<1> idx) {
+                for(int i = 0; i < local_size; ++i) {
+                  const particle_type p = scratch[i];
+                  const particle_type my_p = my_particle(idx);
+
+                  const vector_type R{p.x() - my_p.x(), p.y() - my_p.y(), p.z() - my_p.z()};
+
+                  const float_type r_inv =
+                      sycl::rsqrt(R.x() * R.x() + R.y() * R.y() + R.z() * R.z() + gravitational_softening);
+
+
+                  if(idx.get_global_id(0) != offset + i)
+                    acceleration(idx) += static_cast<float_type>(p.w()) * r_inv * r_inv * r_inv * R;
+                }
+              });
+            }
+
+            grp.distribute_for([&](sycl::sub_group, sycl::logical_item<1> idx) {
+              const size_t global_id = idx.get_global_id(0);
+
+              vector_type v = velocities_access[global_id];
+              // This is a dirt cheap Euler integration, but could be
+              // converted into a much better leapfrog integration when properly
+              // initializing the velocities to the state at 0.5*dt
+              v += acceleration(idx) * dt;
+
+              // Update position
+              particle_type my_p = my_particle(idx);
+              my_p.x() += v.x() * dt;
+              my_p.y() += v.y() * dt;
+              my_p.z() += v.z() * dt;
+
+              if(global_id < problem_size) {
+                output_velocities_access[global_id] = v;
+                output_particles_access[global_id] = my_p;
+              }
+            });
+          });
+    });
+#endif
+  }
 };
 
 template<class float_type>
@@ -336,6 +418,30 @@ public:
   }
 };
 
+template<class float_type>
+class NBodyScoped : public NBody<float_type>
+{
+public:
+  using typename NBody<float_type>::particle_type;
+  using typename NBody<float_type>::vector_type;
+
+  NBodyScoped(const BenchmarkArgs& _args)
+  : NBody<float_type>{_args} {}
+
+
+  void run(){
+    this->submitScoped(this->particles_buf.get(), this->velocities_buf.get());
+  }
+
+  std::string getBenchmarkName() {
+    std::stringstream name;
+    name << "NBody_Scoped_";
+    name << ReadableTypename<float_type>::name;
+    
+    return name.str();
+  }
+};
+
 int main(int argc, char** argv)
 {
 
@@ -348,6 +454,9 @@ int main(int argc, char** argv)
     app.run< NBodyNDRange<float> >();
     app.run< NBodyNDRange<double> >();
   }
-
+#ifdef __HIPSYCL__
+  app.run< NBodyScoped<float> >();
+  app.run< NBodyScoped<double> >();
+#endif
   return 0;
 }

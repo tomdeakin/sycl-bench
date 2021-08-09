@@ -8,6 +8,7 @@ class IndependentDagTaskThroughputKernelSingleTask;
 class IndependentDagTaskThroughputKernelBasicPF;
 class DagTaskThroughputKernelNdrangePF;
 class DagTaskThroughputKernelHierarchicalPF;
+class DagTaskThroughputKernelScopedPF;
 
 // Measures the time it takes to run <problem-size> trivial single_task and parallel_for kernels
 // that are *independent*. 
@@ -106,6 +107,29 @@ public:
     }
   }
 
+  void submit_scoped_parallel_for()
+  {
+#ifdef __HIPSYCL__
+    for(std::size_t i = 0; i < args.problem_size; ++i) {
+      args.device_queue.submit(
+          [&](cl::sycl::handler& cgh) {
+        auto acc = dummy_buffers[i].get_access<sycl::access::mode::discard_write>(cgh);
+        
+        cgh.parallel<DagTaskThroughputKernelScopedPF>(
+          sycl::range<1>{1}, sycl::range<1>{args.local_size},
+          [=](sycl::group<1> grp, auto)
+        {
+          grp.distribute_for([&](sycl::sub_group sg, sycl::logical_item<1> idx){
+            if(idx.get_global_id(0) == 0)
+              acc[0] = i;
+          });
+        });  
+      }); // submit
+    }
+#endif
+  }
+
+
   bool verify(VerificationSetting &ver) { 
     for(std::size_t i = 0; i < dummy_buffers.size(); ++i){
       auto host_acc =
@@ -183,6 +207,22 @@ public:
   }
 };
 
+class IndependentDagTaskThroughputScopedPF
+    : public IndependentDagTaskThroughput 
+{
+public:
+  IndependentDagTaskThroughputScopedPF(const BenchmarkArgs& args)
+  : IndependentDagTaskThroughput{args} {}
+
+  void run(){
+    submit_scoped_parallel_for();
+  }
+
+  static std::string getBenchmarkName() {
+    return "Runtime_IndependentDAGTaskThroughput_ScopedParallelFor";
+  }
+};
+
 int main(int argc, char** argv)
 {
   BenchmarkApp app(argc, argv);
@@ -195,5 +235,8 @@ int main(int argc, char** argv)
   if(app.shouldRunNDRangeKernels())
     app.run<IndependentDagTaskThroughputNDRangePF>();
   
+#ifdef __HIPSYCL__
+  app.run<IndependentDagTaskThroughputScopedPF>();
+#endif
   return 0;
 }
