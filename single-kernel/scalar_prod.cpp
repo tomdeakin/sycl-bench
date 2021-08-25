@@ -99,8 +99,10 @@ public:
         cgh.parallel<class ScalarProdKernelScoped<T, invocation_kind>>(
           cl::sycl::range<1>{args.problem_size / args.local_size},
           cl::sycl::range<1>{args.local_size},
-          [=](cl::sycl::group<1> grp, cl::sycl::physical_item<1>){
-            grp.distribute_for([&](cl::sycl::sub_group, cl::sycl::logical_item<1> idx){
+          [=](auto grp){
+            cl::sycl::distribute_items(
+              grp, [&](cl::sycl::s_item<1> idx){
+              
               size_t gid = idx.get_global_id(0);
               intermediate_product[gid] = in1[gid] * in2[gid];
             });
@@ -204,10 +206,12 @@ public:
 #ifdef __HIPSYCL__
             cgh.parallel<class ScalarProdReductionScoped<T, invocation_kind>>(
               cl::sycl::range<1>{n_wgroups}, cl::sycl::range<1>{wgroup_size},
-              [=](cl::sycl::group<1> grp, cl::sycl::physical_item<1>){
-                grp.distribute_for([&](cl::sycl::sub_group, cl::sycl::logical_item<1> idx){
+              [=](auto grp){
+                cl::sycl::distribute_items_and_wait(
+                  grp, [&](cl::sycl::s_item<1> idx){
+                  
                   const size_t gid = idx.get_global_id(0);
-                  const size_t lid = idx.get_local_id(0);
+                  const size_t lid = idx.get_innermost_local_id(0);
 
                   // initialize local memory to 0
                   local_mem[lid] = 0; 
@@ -219,10 +223,12 @@ public:
                       local_mem[lid] += global_mem[input_element];
                   }
                 });
-                for(size_t stride = wgroup_size/elements_per_thread; stride >= 1; stride /= elements_per_thread) {
-                  grp.distribute_for([&](cl::sycl::sub_group, cl::sycl::logical_item<1> idx){
+                
+                for(size_t stride = wgroup_size/elements_per_thread; 
+                    stride >= 1; stride /= elements_per_thread) {
+                  cl::sycl::distribute_items_and_wait(grp, [&](cl::sycl::s_item<1> idx){
                   
-                    const size_t lid = idx.get_local_id(0);
+                    const size_t lid = idx.get_innermost_local_id(0);
                     
                     if(lid < stride) {
                       for(int i = 0; i < elements_per_thread-1; ++i){
@@ -231,8 +237,8 @@ public:
                     }
                   });
                 }
-                grp.single_item([&](){
-                  global_mem[grp.get_id(0) * grp.get_local_range(0)] = local_mem[0];
+                cl::sycl::single_item(grp, [&](){
+                  global_mem[grp.get_group_id(0) * grp.get_logical_local_range(0)] = local_mem[0];
                 });
               });
 #endif

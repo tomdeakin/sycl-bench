@@ -133,30 +133,30 @@ public:
       cgh.parallel<ReductionKernelScoped<T>>(
         sycl::range<1>{_args.problem_size / _args.local_size},
         sycl::range<1>{_args.local_size},
-        [=](sycl::group<1> grp, sycl::physical_item<1> phys_id) {
+        [=](auto grp) {
 
-          grp.distribute_for([&](sycl::sub_group sg,
-                                sycl::logical_item<1> idx){
+          sycl::distribute_items_and_wait(
+            grp, [&](sycl::s_item<1> idx){
             
-            const int lid = idx.get_local_id(0);
+            const int lid = idx.get_innermost_local_id(0);
             const auto gid = idx.get_global_id();
 
             scratch[lid] = acc[gid];
           });
         
           for(int i = group_size/2; i > 0; i /= 2) {
-            grp.distribute_for([&](sycl::sub_group sg,
-                                  sycl::logical_item<1> idx){
+            sycl::distribute_items_and_wait(
+              grp, [&](sycl::s_item<1> idx){
               
-              const int lid = idx.get_local_id(0);
+              const int lid = idx.get_innermost_local_id(0);
 
               if (lid < i) 
                 scratch[lid] += scratch[lid + i];
             });
           }
 
-          grp.single_item([&](){
-            acc[grp.get_group_id(0) * grp.get_local_range(0)] = scratch[0];
+          sycl::single_item(grp, [&](){
+            acc[grp.get_group_id(0) * grp.get_logical_local_range(0)] = scratch[0];
           });
         });
     })); // submit

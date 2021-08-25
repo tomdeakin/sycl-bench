@@ -308,12 +308,12 @@ protected:
       cgh.parallel<ScopedNBodyKernel<float_type>>(sycl::range<1>{problem_size / local_size},
           sycl::range<1>{local_size},
           [=, dt = this->dt, gravitational_softening = this->gravitational_softening](
-            sycl::group<1> grp, sycl::physical_item<1>) {
+            auto grp) {
             
-            sycl::private_memory<particle_type> my_particle{grp};
-            sycl::private_memory<vector_type> acceleration{grp};
+            sycl::s_private_memory<particle_type, decltype(grp)> my_particle{grp};
+            sycl::s_private_memory<vector_type, decltype(grp)> acceleration{grp};
 
-            grp.distribute_for([&](sycl::sub_group, sycl::logical_item<1> idx) {
+            sycl::distribute_items(grp, [&](sycl::s_item<1> idx) {
               acceleration(idx) = vector_type{static_cast<float_type>(0.0f)};
               my_particle(idx) = (idx.get_global_id(0) < problem_size) ? particles_access[idx.get_global_id(0)]
                                                                        : particle_type{static_cast<float_type>(0.0f)};
@@ -321,13 +321,14 @@ protected:
 
 
             for(size_t offset = 0; offset < problem_size; offset += local_size) {
-              grp.distribute_for([&](sycl::sub_group, sycl::logical_item<1> idx) {
-                scratch[idx.get_local_id(0)] = (idx.get_global_id(0) < problem_size)
-                                                   ? particles_access[offset + idx.get_local_id(0)]
+              sycl::distribute_items_and_wait(grp, [&](sycl::s_item<1> idx) {
+                scratch[idx.get_innermost_local_id(0)] = 
+                  (idx.get_global_id(0) < problem_size)
+                                                   ? particles_access[offset + idx.get_innermost_local_id(0)]
                                                    : particle_type{static_cast<float_type>(0.0f)};
               });
 
-              grp.distribute_for([&](sycl::sub_group, sycl::logical_item<1> idx) {
+              sycl::distribute_items_and_wait(grp, [&](sycl::s_item<1> idx) {
                 for(int i = 0; i < local_size; ++i) {
                   const particle_type p = scratch[i];
                   const particle_type my_p = my_particle(idx);
@@ -344,7 +345,7 @@ protected:
               });
             }
 
-            grp.distribute_for([&](sycl::sub_group, sycl::logical_item<1> idx) {
+            sycl::distribute_items(grp, [&](sycl::s_item<1> idx) {
               const size_t global_id = idx.get_global_id(0);
 
               vector_type v = velocities_access[global_id];

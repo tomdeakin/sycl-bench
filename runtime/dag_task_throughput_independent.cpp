@@ -117,9 +117,9 @@ public:
         
         cgh.parallel<DagTaskThroughputKernelScopedPF>(
           sycl::range<1>{1}, sycl::range<1>{args.local_size},
-          [=](sycl::group<1> grp, auto)
+          [=](auto grp)
         {
-          grp.distribute_for([&](sycl::sub_group sg, sycl::logical_item<1> idx){
+          sycl::distribute_items(grp, [&](sycl::s_item<1> idx){
             if(idx.get_global_id(0) == 0)
               acc[0] = i;
           });

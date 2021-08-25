@@ -226,25 +226,29 @@ private:
       cgh.parallel<ReductionKernelScoped<T>>(
         sycl::range<1>{num_groups},
         sycl::range<1>{_args.local_size},
-        [=](sycl::group<1> grp, sycl::physical_item<1> idx) {
+        [=](auto grp) {
 
-          grp.distribute_for([&](sycl::sub_group sg, sycl::logical_item<1> idx){
-            const int lid = idx.get_local_id(0);
+          sycl::distribute_items_and_wait(
+            grp, [&](sycl::s_item<1> idx){
+            
+            const int lid = idx.get_innermost_local_id(0);
             const auto gid = idx.get_global_id();
 
             scratch[lid] = (gid[0] < reduction_size) ? acc[gid] : 0;
           });
         
           for(int i = group_size/2; i > 0; i /= 2) {
-            grp.distribute_for([&](sycl::sub_group sg, sycl::logical_item<1> idx){
-              const int lid = idx.get_local_id(0);
+            sycl::distribute_items_and_wait(
+              grp, [&](sycl::s_item<1> idx){
+              
+              const int lid = idx.get_innermost_local_id(0);
 
               if (lid < i) 
                 scratch[lid] += scratch[lid + i];
             });
           }
           
-          grp.single_item([&](){
+          sycl::single_item(grp, [&](){
             acc_out[grp.get_group_id(0)] = scratch[0];
           });
 
